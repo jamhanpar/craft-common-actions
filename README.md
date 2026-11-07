@@ -11,7 +11,7 @@ This repository unifies and eliminates duplicate CI/CD and release workflow defi
 ### 1. `release.yml`
 Full multi-platform release pipeline for Craft apps:
 - **macOS universal** (x86_64 + aarch64 universal bundle, DMG, CLI, Developer ID codesign & notarization)
-- **Windows** (x64, x86, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
+- **Windows** (x64, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
 - **Linux** (x86_64, aarch64 AppImage, deb, rpm, tar.gz via nfpm)
 - **Flatpak** (x86_64, aarch64 bundle generation)
 - **FreeBSD** (FreeBSD 15.1-STABLE VM build & packaging for x86_64 and aarch64; aarch64 is cross-compiled in the same x86_64 VM and set by default through `freebsd-architectures`, see #39)
@@ -19,6 +19,12 @@ Full multi-platform release pipeline for Craft apps:
 - **WebAssembly** (wasm32-unknown-unknown with Trunk)
 - **Linux RISC-V 64** (cross-compilation for riscv64gc-unknown-linux-gnu, producing deb, rpm, and tar.gz via SHA256-verified nfpm; built on Ubuntu 24.04, so it sets `GLIBC_FLOOR=2.39` for the app's `nfpm.yaml` to declare, see #44)
 - **Draft Release** (signs the Linux packages, computes and signs `SHA256SUMS.txt`, and publishes/updates draft GitHub Release; see [Linux package signing](#linux-package-signing))
+
+Every build job sets `VERSION`, `BUILD_DATE` and `BUILD_SHA`, and the app's own
+`<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA`. The prefix is the one the app's
+`packaging/env.sh` (or `packaging/common.sh`) reads in `VERSION="${<PREFIX>_VERSION:-...}"`, so a
+new app needs no change here; without that line it is `app-name` in capitals (`craft-anything`:
+`CRAFT_ANYTHING`).
 
 #### Caller Example:
 ```yaml
@@ -655,6 +661,28 @@ jobs:
     uses: storytold/craft-common-actions/.github/workflows/release.yml@main
 ```
 
+### 10. `house-rules.yml`
+
+Fails unless `AGENTS.md` carries the shared house rules from
+[storytold/craft-contrib](https://github.com/storytold/craft-contrib) unchanged. Each block names
+the commit it was copied from and the SHA-256 of the bytes inside it. The check loads
+`standards/house-rules-core.md` (and `standards/house-rules-rust.md` when `rust` is true) at that
+commit, requires the commit to be on `main`, and compares the normalized bytes. An edited block, or
+a commit that is not on `main`, fails. An intact older commit warns. A source that cannot be read
+fails as "could not check". `rust` defaults to true; a repository that is not Rust passes `false`.
+
+The caller is only the workflow call. The reusable workflow checks the app out and checks
+craft-contrib out at `main` with full history.
+
+#### Caller Example:
+```yaml
+jobs:
+  house-rules:
+    uses: storytold/craft-common-actions/.github/workflows/house-rules.yml@main
+    with:
+      rust: true
+```
+
 ## Composite Actions
 
 Individual actions are also available for composing custom pipelines:
@@ -680,7 +708,9 @@ Individual actions are also available for composing custom pipelines:
 - `actions/packaging-lint`: Steps for packaging linter.
 - `actions/setup-windows-signing`: Exports the shared Authenticode signing script (`CRAFT_SIGN_SCRIPT`) for the app's packaging step (see "Windows code signing").
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
+- `actions/export-app-build-env`: Sets the app's own `<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA` for the steps after it, with the prefix its `packaging/env.sh` reads (or `env-prefix`); its `names` output lists them for a VM's `envs`.
 - `actions/check-git-sources`: The check `git-sources.yml` runs, for a job that has already checked out the app; `allowed-prefix` changes where git dependencies may come from (default `git+https://github.com/storytold/`).
+- `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history; `require-rust` asks for the Rust block as well as the core block.
 
 ## Storytold Organization Hosting
 
