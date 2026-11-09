@@ -95,7 +95,9 @@ somewhere users can check it independently. On first install, compare that finge
 The workflow pushes the Flatpak OCI image itself: the app's `packaging/linux/flatpak-oci.sh` only
 builds the layout. Every run except a pull request pushes `ghcr.io/<repo>:<version>-<arch>`; only a
 stable version built from the `release` branch also moves `stable-<arch>`, whatever the app's copy
-of the script does with `--push`.
+of the script does with `--push`. When `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are configured
+(e.g. as organization secrets), the job dual-pushes the OCI layout to `docker.io/storytold/<app>`
+with the same version and stable architecture tags.
 
 The key must sign without a passphrase. Keep the primary key offline and store only a signing
 subkey:
@@ -687,8 +689,9 @@ jobs:
 
 Builds one image per entry in `platforms`, pushes every platform by digest to each repository in
 `images`, then joins those digests into a single multi-arch manifest per repository. It logs in only
-where an image needs it: `registry.digitalocean.com` when a DOCR image is listed, `ghcr.io` through
-the workflow token, and `dhi.io` when `dhi-login: true` and the Docker Hub secrets are provided.
+where an image needs it: `ghcr.io` through the workflow token, `docker.io` when Docker Hub images
+are listed (using `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`), and `dhi.io` when `dhi-login: true`
+and the Docker Hub secrets are provided.
 
 Both craft web images publish this way. `font-preview-service` fetches its font sources into the
 build context first, so it passes a `pre-build-command`; `artcraft-services` builds one platform on a
@@ -718,8 +721,8 @@ jobs:
     uses: storytold/craft-common-actions/.github/workflows/docker-build.yml@main
     with:
       images: |
-        registry.digitalocean.com/artcraft/artcraft-services
         ghcr.io/storytold/artcraft-services
+        docker.io/storytold/artcraft-services
       platforms: '[{"platform":"linux/amd64","runner":"github-ubuntu-64core"}]'
       dockerfile: build/service_cpu.Dockerfile
       build-args: |
@@ -863,6 +866,11 @@ with the rustup `llvm-profdata` and `llvm-cov` tools. Pass `shards: 1` to keep
 the single `cargo llvm-cov` job. Sharded runs skip doctests, because nextest
 does not run them.
 
+The scan job frees unused runner SDKs before either Rust coverage path. Sharded
+coverage merges and removes raw profiles before extracting the test archive, then
+releases the compressed archive and temporary binaries as they are consumed.
+Disk-space snapshots in the logs show headroom before cleanup and aggregation.
+
 The new limits leave headroom over sampled Craft app job timings; the existing
 FreeBSD and ARM64 limits are retained. Treat these as initial limits, review
 successful cold builds after rollout and lower them when the evidence supports it.
@@ -910,6 +918,11 @@ With Python 3 and PyYAML installed, run:
 ```sh
 python3 -m unittest discover -s tests -v
 ```
+
+GnuPG signing fixtures need local Unix sockets for their temporary agents. They
+report an explicit skip when a local sandbox denies socket creation or binding;
+the same restriction remains a failure on GitHub Actions. Other GPG errors are
+not skipped, and the hosted suite exercises the real protected-key fixture.
 
 The tests execute the FreeBSD run template under the host's POSIX shell with
 fixture build/test commands and real tar archives. They cover failures in each
