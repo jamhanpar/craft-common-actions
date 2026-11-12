@@ -97,7 +97,11 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: block
+          # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
+          # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
+            *.amazontrust.com:80
+            motd.ubuntu.com:443
             *.amazonaws.com:443
             *.crates.io:443
             *.s3.amazonaws.com:443
@@ -109,8 +113,6 @@ jobs:
             *.pythonhosted.org:443
             *.sonarcloud.io:443
             *.sonarsource.com:443
-            *.ubuntu.com:80
-            *.ubuntu.com:443
             api.github.com:443
             archive.ubuntu.com:80
             archive.ubuntu.com:443
@@ -118,11 +120,16 @@ jobs:
             azure.archive.ubuntu.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            esm.ubuntu.com:443
             files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
             keys.openpgp.org:443
             keyserver.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
+            mirrors.dotsrc.org:443
+            mirrors.edge.kernel.org:443
             objects.githubusercontent.com:443
             packages.microsoft.com:443
             pypi.org:443
@@ -168,7 +175,11 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: block
+          # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
+          # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
+            *.amazontrust.com:80
+            motd.ubuntu.com:443
             *.amazonaws.com:443
             *.crates.io:443
             *.s3.amazonaws.com:443
@@ -180,8 +191,6 @@ jobs:
             *.pythonhosted.org:443
             *.sonarcloud.io:443
             *.sonarsource.com:443
-            *.ubuntu.com:80
-            *.ubuntu.com:443
             api.github.com:443
             archive.ubuntu.com:80
             archive.ubuntu.com:443
@@ -189,11 +198,16 @@ jobs:
             azure.archive.ubuntu.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            esm.ubuntu.com:443
             files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
             keys.openpgp.org:443
             keyserver.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
+            mirrors.dotsrc.org:443
+            mirrors.edge.kernel.org:443
             objects.githubusercontent.com:443
             packages.microsoft.com:443
             pypi.org:443
@@ -232,10 +246,10 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component llvm-tools-preview
           rustup default stable
-      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+      - uses: step-security/taiki-e-install-action@76747d22a7567cc4438546a84f11bdf18e670ab8 # v2.87.32
         with:
           tool: cargo-llvm-cov,cargo-nextest@0.9.150
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Provision pinned PDF test fonts
@@ -289,7 +303,11 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: block
+          # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
+          # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
+            *.amazontrust.com:80
+            motd.ubuntu.com:443
             *.amazonaws.com:443
             *.crates.io:443
             *.s3.amazonaws.com:443
@@ -301,8 +319,6 @@ jobs:
             *.pythonhosted.org:443
             *.sonarcloud.io:443
             *.sonarsource.com:443
-            *.ubuntu.com:80
-            *.ubuntu.com:443
             api.github.com:443
             archive.ubuntu.com:80
             archive.ubuntu.com:443
@@ -310,11 +326,16 @@ jobs:
             azure.archive.ubuntu.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            esm.ubuntu.com:443
             files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
             keys.openpgp.org:443
             keyserver.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
+            mirrors.dotsrc.org:443
+            mirrors.edge.kernel.org:443
             objects.githubusercontent.com:443
             packages.microsoft.com:443
             pypi.org:443
@@ -347,7 +368,7 @@ jobs:
             pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev
             libxi-dev libgtk-3-dev libfontconfig1-dev libfreetype-dev libasound2-dev libsoup-3.0-dev libwebkit2gtk-4.1-dev
             libgl1-mesa-dev mesa-vulkan-drivers
-      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+      - uses: step-security/taiki-e-install-action@76747d22a7567cc4438546a84f11bdf18e670ab8 # v2.87.32
         with:
           tool: cargo-nextest@0.9.150
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -383,11 +404,44 @@ jobs:
             echo "::error::shard $SHARD produced no coverage profiles"
             exit 1
           fi
+      - name: Install LLVM tools for the archive's toolchain
+        run: rustup toolchain install "$(cat archive/rustc-release.txt)" --profile minimal --component llvm-tools-preview
+      - name: Merge this shard's profiles
+        # Raw profiles of a large workspace run to tens of gigabytes per shard; the scan job cannot
+        # hold every shard's at once. One sparse indexed profile per shard is a small fraction of that.
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          toolchain="$(cat archive/rustc-release.txt)"
+          llvm_bin="$(rustup run "$toolchain" rustc --print sysroot)/lib/rustlib/$(rustup run "$toolchain" rustc -vV | sed -n 's/^host: //p')/bin"
+          echo "Raw profiles: $(du -sh profraw | cut -f1) in $(find profraw -name '*.profraw' | wc -l) files"
+          df -h .
+          mkdir -p profdata
+          # failure-mode=any stops on any unreadable input. A profile cut short (a test process that
+          # crashed while writing it, or a full disk) fails this shard and names the file, instead of
+          # being uploaded and failing the scan's merge later with no shard to look at.
+          status=0
+          "$llvm_bin/llvm-profdata" merge -sparse --failure-mode=any profraw/*.profraw \
+            -o "profdata/shard-$SHARD.profdata" 2>merge-errors.txt || status=$?
+          if [ "$status" -ne 0 ]; then
+            cat merge-errors.txt >&2
+            sed -n 's/^warning: \(.*\.profraw\): \(.*\)$/\1: \2/p' merge-errors.txt | while IFS= read -r bad; do
+              echo "::error::shard $SHARD wrote a truncated or corrupt coverage profile: $bad"
+            done
+            echo "::error::llvm-profdata could not merge shard $SHARD's profiles (exit $status)"
+            rm -rf profdata
+            exit "$status"
+          fi
+          rm -rf profraw merge-errors.txt
+          echo "Merged profile: $(du -sh "profdata/shard-$SHARD.profdata" | cut -f1)"
+          df -h .
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: profraw-${{ matrix.shard }}
-          path: profraw/
-          if-no-files-found: ignore
+          name: profdata-${{ matrix.shard }}
+          path: profdata/
+          if-no-files-found: error
           retention-days: 1
 
   sonarcloud:
@@ -402,7 +456,11 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: block
+          # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
+          # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
+            *.amazontrust.com:80
+            motd.ubuntu.com:443
             *.amazonaws.com:443
             *.crates.io:443
             *.s3.amazonaws.com:443
@@ -414,8 +472,6 @@ jobs:
             *.pythonhosted.org:443
             *.sonarcloud.io:443
             *.sonarsource.com:443
-            *.ubuntu.com:80
-            *.ubuntu.com:443
             api.github.com:443
             archive.ubuntu.com:80
             archive.ubuntu.com:443
@@ -423,11 +479,16 @@ jobs:
             azure.archive.ubuntu.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            esm.ubuntu.com:443
             files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
             keys.openpgp.org:443
             keyserver.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
+            mirrors.dotsrc.org:443
+            mirrors.edge.kernel.org:443
             objects.githubusercontent.com:443
             packages.microsoft.com:443
             pypi.org:443
@@ -467,7 +528,22 @@ jobs:
             echo "::error::Invalid SonarCloud project key: must start with an alphanumeric character or underscore and contain only letters, digits, dash, underscore, period or colon (max 400 characters)."
             exit 1
           fi
-          printf 'key=%s\n' "$PROJECT_KEY" >>"$GITHUB_OUTPUT"
+          # A -D argument replaces the same property in sonar-project.properties, so the repository's
+          # own duplication exclusions are appended to the shared one here.
+          cpd='**/i18n/**'
+          own=""
+          if [[ -f sonar-project.properties ]]; then
+            # Properties syntax: optional blanks around `=` or `:`, and a CRLF file leaves a trailing \r.
+            own=$(sed -n 's/^[ \t]*sonar\.cpd\.exclusions[ \t]*[=:][ \t]*//p' sonar-project.properties | tail -n 1 | sed 's/[ \t\r]*$//')
+          fi
+          if [[ -n "$own" ]]; then
+            if [[ ! "$own" =~ ^[a-zA-Z0-9_.*?/,-]+$ ]]; then
+              echo "::error::Invalid sonar.cpd.exclusions in sonar-project.properties: only letters, digits, and _ . * ? / , - are allowed."
+              exit 1
+            fi
+            cpd="$cpd,$own"
+          fi
+          printf 'key=%s\ncpd=%s\n' "$PROJECT_KEY" "$cpd" >>"$GITHUB_OUTPUT"
       - name: Check out craft-fonts
         if: steps.token.outputs.available == 'true' && inputs.shards <= 1
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -502,11 +578,11 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component llvm-tools-preview
           rustup default stable
-      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+      - uses: step-security/taiki-e-install-action@76747d22a7567cc4438546a84f11bdf18e670ab8 # v2.87.32
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
         with:
           tool: cargo-llvm-cov
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -542,8 +618,9 @@ jobs:
         if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: profraw-*
-          path: profraw
+          # One merged profile per shard (shard-N.profdata), never the raw profiles.
+          pattern: profdata-*
+          path: profdata
           merge-multiple: true
       - name: Download test archive
         if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
@@ -562,10 +639,10 @@ jobs:
           toolchain="$(cat archive/rustc-release.txt)"
           llvm_bin="$(rustup run "$toolchain" rustc --print sysroot)/lib/rustlib/$(rustup run "$toolchain" rustc -vV | sed -n 's/^host: //p')/bin"
           df -h . "$RUNNER_TEMP"
-          # Do not hold every raw profile beside the expanded archive. Retain the raw inputs
+          # Each shard merged its own raw profiles; combine those. Retain the shard profiles
           # until the merge succeeds, then release them before unpacking the test binaries.
-          "$llvm_bin/llvm-profdata" merge -sparse profraw/*.profraw -o coverage.profdata
-          rm -f profraw/*.profraw
+          "$llvm_bin/llvm-profdata" merge -sparse profdata/*.profdata -o coverage.profdata
+          rm -f profdata/*.profdata
           df -h . "$RUNNER_TEMP"
           # Unpack outside the checkout: the scanner analyses everything under the workspace, and build
           # output (generated sources) there would be counted as duplicated code.
@@ -656,7 +733,7 @@ jobs:
           echo "status=$status" >>"$GITHUB_OUTPUT"
       - name: SonarCloud Scan
         if: steps.token.outputs.available == 'true'
-        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
+        uses: step-security/sonarqube-scan-action@c2312f8888f2bff4220bd815febb9d4a7cb32433 # v8.2.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_CLOUD_PAT || secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: https://sonarcloud.io
@@ -665,7 +742,7 @@ jobs:
             "-Dsonar.projectKey=${{ steps.project.outputs.key }}"
             -Dsonar.organization=storytold
             -Dsonar.rust.lcov.reportPaths=lcov.info
-            "-Dsonar.cpd.exclusions=**/i18n/**"
+            "-Dsonar.cpd.exclusions=${{ steps.project.outputs.cpd }}"
       - name: Fail on JavaScript/TypeScript test failures
         if: steps.node-coverage.outputs.status != '' && steps.node-coverage.outputs.status != '0'
         env:

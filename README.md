@@ -26,6 +26,30 @@ Every build job sets `VERSION`, `BUILD_DATE` and `BUILD_SHA`, and the app's own
 new app needs no change here; without that line it is `app-name` in capitals (`craft-anything`:
 `CRAFT_ANYTHING`).
 
+#### Cutting a release
+
+`scripts/cut_release.py <owner/app>` cuts a release without a version-bump pull request, so a
+change of version strings never waits on the full CI of a pull request:
+
+1. It takes the newest commit on main whose `CI` run for a push passed (`--commit` picks another;
+   `--gate-workflow` names another workflow).
+2. It commits the version bump there: `[workspace.package] version`, the internal path
+   dependencies, and Cargo.lock's entries for the workspace's own packages. A repository with
+   other files that name the version adds `packaging/set-version.sh <old> <new>`.
+3. It merges that into `release` (main's version lines win) and pushes, which starts the app's
+   `release.yml`.
+4. It opens a pull request that brings the same bump to main, with auto-merge on where the
+   repository allows it. The release doesn't wait for it.
+5. With `--publish` it waits for `release.yml` and publishes the draft once every job passed and
+   the draft has assets. Otherwise it stops after the push.
+
+The version defaults to the next minor after the last published release (`--part patch`, or
+`--version 1.2.3-rc.1`). `--dry-run` does everything but push. It needs git, cargo (to check
+Cargo.lock) and an authenticated `gh` whose account may update `release`.
+
+`scripts/release_train.py --all --skip figcraft,soundcraft --publish` runs it for many apps at once, in
+parallel, with a log per app and a summary of what was published or stopped.
+
 #### Caller Example:
 ```yaml
 name: Release
@@ -755,7 +779,8 @@ Individual actions are also available for composing custom pipelines:
     with:
       packages: pkg-config libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
   ```
-- `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers.
+- `actions/configure-apt-mirrors`: Points the runner's Ubuntu archive sources at a mirror list that reaches beyond ubuntu.com, with the mirrors that answer first: the image's own mirrors (azure.archive, archive and security.ubuntu.com, or ports.ubuntu.com on arm), then `mirrors.edge.kernel.org` and `mirrors.dotsrc.org` (amd64) or `mirrors.dotsrc.org` and `ftp.tu-chemnitz.de` (arm). `install-apt-packages` runs it before every download attempt; run it before a plain `apt-get update`. A job whose Harden-Runner policy blocks egress must allow those hosts on port 443.
+- `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers. amd64 and riscv64 come from one pair of mirrors serving the same snapshot: Ubuntu's own (archive, security and ports.ubuntu.com), then `mirrors.dotsrc.org` for both, then `mirrors.edge.kernel.org` with `ftp.tu-chemnitz.de` (ports); the image's own Ubuntu sources are disabled in that job. A job whose Harden-Runner policy blocks egress must allow those hosts on port 443.
 - `actions/install-trunk`: Installs Trunk for WebAssembly builds.
 - `actions/draft-release`: Collects artifacts, signs the Linux packages when given `signing-key`, calculates (and signs) SHA256 checksums, and publishes/updates draft GitHub release.
 - `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
@@ -861,13 +886,16 @@ This step requires the Sonar token, so token-independent CI should also run the 
 
 Workspaces run their tests as four parallel `cargo nextest` partitions by
 default. One job builds the instrumented test archive; each partition runs from
-that archive and uploads its profile data, and the scan job merges the profiles
-with the rustup `llvm-profdata` and `llvm-cov` tools. Pass `shards: 1` to keep
-the single `cargo llvm-cov` job. Sharded runs skip doctests, because nextest
-does not run them.
+that archive, merges its own raw profiles into one sparse `.profdata` with the
+rustup `llvm-profdata`, and uploads only that; the scan job merges the shard
+profiles and exports them with `llvm-cov`. A raw profile that `llvm-profdata`
+cannot read (for example one cut short by a test process that crashed while
+writing it) fails its shard and is named in an error annotation, rather than
+reaching the scan. Pass `shards: 1` to keep the single `cargo llvm-cov` job.
+Sharded runs skip doctests, because nextest does not run them.
 
 The scan job frees unused runner SDKs before either Rust coverage path. Sharded
-coverage merges and removes raw profiles before extracting the test archive, then
+coverage merges and removes the shard profiles before extracting the test archive, then
 releases the compressed archive and temporary binaries as they are consumed.
 Disk-space snapshots in the logs show headroom before cleanup and aggregation.
 
