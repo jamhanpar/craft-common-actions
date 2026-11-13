@@ -225,6 +225,8 @@ jobs:
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.fonts-ref }}
+      - name: Check out craft-i18n
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - name: Require requested craft-fonts
         if: inputs.fonts-ref != ''
         shell: bash
@@ -353,6 +355,8 @@ jobs:
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.fonts-ref }}
+      - name: Check out craft-i18n
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - name: Require requested craft-fonts
         if: inputs.fonts-ref != ''
         shell: bash
@@ -390,8 +394,8 @@ jobs:
         run: |
           mkdir -p profraw
           # nextest exits 100 when tests fail. A red test must not hide the static analysis, so
-          # that alone keeps the job green. Any other exit means the shard could not run its
-          # tests at all (for example a test binary nextest cannot list): fail the job, because a
+          # record that status for the scan job to fail after uploading analysis. Any other exit
+          # means the shard could not run its tests at all (for example a test binary nextest cannot list): fail the job, because a
           # shard that runs nothing would scan an empty coverage report.
           rc=0
           cargo nextest run --archive-file archive/nextest-archive.tar.zst \
@@ -400,10 +404,35 @@ jobs:
             echo "::error::nextest could not run shard $SHARD (exit $rc)"
             exit "$rc"
           fi
-          if ! ls profraw/*.profraw >/dev/null 2>&1; then
+          mkdir -p profdata
+          printf '%s\n' "$rc" > "profdata/shard-$SHARD.status"
+          if ls profraw/*.profraw >/dev/null 2>&1; then
+            profiles=true
+          else
+            profiles=false
+          fi
+
+          if [ "$rc" -eq 100 ]; then
+            echo "::warning::Coverage shard $SHARD/$TOTAL_SHARDS has failing tests; see this job's test log."
+            if [ "$profiles" = true ]; then
+              result="**Tests failed.** Coverage profiles are available, so the SonarCloud scan will continue. A green coverage job does not mean the tests passed; see this job's log for failed tests and diagnostics."
+            else
+              result='**Tests failed.** This shard produced no coverage profiles, so its tests cannot be included in the SonarCloud scan.'
+            fi
+          else
+            if [ "$profiles" = true ]; then
+              result='**Tests passed.** Coverage profiles are available for the SonarCloud scan.'
+            else
+              result='**Tests passed.** This shard produced no coverage profiles, so its tests cannot be included in the SonarCloud scan.'
+            fi
+          fi
+          printf '### Coverage shard %s/%s\n\n%s\n' "$SHARD" "$TOTAL_SHARDS" "$result" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$profiles" != true ]; then
             echo "::error::shard $SHARD produced no coverage profiles"
             exit 1
           fi
+
       - name: Install LLVM tools for the archive's toolchain
         run: rustup toolchain install "$(cat archive/rustc-release.txt)" --profile minimal --component llvm-tools-preview
       - name: Merge this shard's profiles
@@ -549,6 +578,10 @@ jobs:
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.fonts-ref }}
+      - name: Check out craft-i18n
+        if: steps.token.outputs.available == 'true' && inputs.shards <= 1
+        id: i18n
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - name: Require requested craft-fonts
         if: inputs.fonts-ref != '' && steps.token.outputs.available == 'true' && inputs.shards <= 1
         shell: bash
@@ -731,6 +764,15 @@ jobs:
           status=0
           npm run --silent -- "$NODE_COVERAGE_SCRIPT" || status=$?
           echo "status=$status" >>"$GITHUB_OUTPUT"
+      # The checkout is a build input, not caller source. Moving it after all coverage runs
+      # prevents an unsharded scan from counting another repository's files as this project.
+      - name: Move craft-i18n outside scan workspace
+        if: steps.i18n.outputs.rev != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="$(mktemp -d "$RUNNER_TEMP/craft-i18n.XXXXXX")"
+          mv -- "$GITHUB_WORKSPACE/craft-i18n" "$destination/checkout"
       - name: SonarCloud Scan
         if: steps.token.outputs.available == 'true'
         uses: step-security/sonarqube-scan-action@c2312f8888f2bff4220bd815febb9d4a7cb32433 # v8.2.1
@@ -750,3 +792,25 @@ jobs:
         run: |
           echo "::error::node-coverage-script exited with status $NODE_COVERAGE_STATUS"
           exit 1
+      - name: Fail on Rust shard test failures
+        if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
+        shell: bash
+        env:
+          TOTAL_SHARDS: ${{ inputs.shards }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for ((shard=1; shard<=TOTAL_SHARDS; shard++)); do
+            path="profdata/shard-$shard.status"
+            if [ ! -f "$path" ]; then
+              echo "::error::Missing test status for coverage shard $shard"
+              failed=1
+              continue
+            fi
+            status="$(cat "$path")"
+            if [ "$status" != 0 ]; then
+              echo "::error::Coverage shard $shard tests failed (exit $status); analysis was still uploaded"
+              failed=1
+            fi
+          done
+          exit "$failed"

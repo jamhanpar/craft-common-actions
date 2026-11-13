@@ -392,7 +392,13 @@ action's version prefix.
 Cache data is restored on the host and explicitly transferred to the guest's
 `/var/tmp/craft-cargo` and `/var/tmp/craft-target`. Only registry/git data and
 `debug`/`release` artifacts are saved, excluding incremental state, Cargo
-credentials/config and Rust toolchains. Successful non-PR runs save caches on a best-effort basis; PRs
+credentials/config and Rust toolchains. A cross build passes its triple as `target`, and
+its `target/<triple>/<profile>` output is saved and restored too: without it, the aarch64
+release job kept only its build scripts and compiled everything else cold. `release.yml`
+keys its cache on the inputs that change the FreeBSD build (app name, architecture,
+craft-fonts ref and FreeBSD release), not on all its inputs: `contributors-artifact`
+names the run, so a key that held it could never be restored, and a `dry-run` shares
+the release's entry, so a dry run warms the cache a release restores. Successful non-PR runs save caches on a best-effort basis; PRs
 only restore. Restore, checkpoint and save failures are non-blocking; each phase has a 10-minute
 time budget. A failed
 restore discards partial guest data before building; a failed checkpoint discards
@@ -507,6 +513,8 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
 - the app and craft-fonts (at the suite's pin, with `CRAFT_FONTS_REQUIRED=1`) checked out without
   persisted credentials, and craft-i18n when the app has `craft-i18n.rev`;
 - `packages` installed through `actions/install-apt-packages` on Linux legs (none when empty);
+- an optional `setup-command` run from the repository root before the gate, for fetching pinned
+  test data such as licensed corpora; its environment changes can be written to `$GITHUB_ENV`;
 - the channel from `rust-toolchain.toml`, or `toolchain`, with clippy, rustfmt and `targets`;
 - prebuilt cargo tools from `tools` (by default `cargo-nextest@0.9.150`);
 - `CARGO_PROFILE_DEV_DEBUG=line-tables-only` (set `dev-debug: ""` to keep the repository's
@@ -534,6 +542,11 @@ check, can be a second call with its own `command`, `os`, `tools` and `targets`,
       tools: trunk@0.21.14
       command: packaging/web/package.sh
 ```
+
+`setup-command` is also passed through the environment, then run with Bash from the checkout root.
+Use it for caller-specific test inputs whose contents are pinned and verified by the caller's
+fetcher. For example, a corpus-enabled workspace can fetch its locked corpus before running the
+gate and export `CRAFT_PSD_CORPUS` through `$GITHUB_ENV`; a failed fetch stops the job before tests.
 
 #### Caller Example:
 ```yaml
@@ -872,6 +885,12 @@ so missing embedded fonts fail explicitly. Callers with `scripts/fetch-pdf-test-
 and set `CRAFT_PDF_TEST_FONT_DIR` before archive compilation and either test runner. Fixture provisioning
 failures stop that job and prevent the dependent scan. The scan still needs to finish and pass its quality gate.
 
+Sharded Rust coverage continues after test failures when the shard produced coverage profiles, so
+SonarCloud can still analyse the code. Each shard reports its test outcome in the job summary;
+failing tests also produce a warning annotation pointing to the test log. A green coverage job
+therefore does not mean all tests passed. If a shard produces no profiles, its summary records
+that the scan cannot include it and the shard fails. Runner errors also fail the shard.
+
 Callers with Python tooling can pass both `python-coverage-source` (a source directory)
 and `python-coverage-script` (the test script). The scan job runs that script under
 pinned coverage.py in an isolated virtual environment and writes `python-coverage.xml`.
@@ -887,12 +906,15 @@ This step requires the Sonar token, so token-independent CI should also run the 
 Workspaces run their tests as four parallel `cargo nextest` partitions by
 default. One job builds the instrumented test archive; each partition runs from
 that archive, merges its own raw profiles into one sparse `.profdata` with the
-rustup `llvm-profdata`, and uploads only that; the scan job merges the shard
+rustup `llvm-profdata`, and uploads that plus a small test-exit-status file; the scan job merges the shard
 profiles and exports them with `llvm-cov`. A raw profile that `llvm-profdata`
 cannot read (for example one cut short by a test process that crashed while
 writing it) fails its shard and is named in an error annotation, rather than
 reaching the scan. Pass `shards: 1` to keep the single `cargo llvm-cov` job.
 Sharded runs skip doctests, because nextest does not run them.
+Ordinary test failures still allow coverage and static analysis to upload, but then
+fail the scan job. Missing shard status also fails closed; a green analysis job
+must not conceal failed tests. The single-shard Rust path is unchanged.
 
 The scan job frees unused runner SDKs before either Rust coverage path. Sharded
 coverage merges and removes the shard profiles before extracting the test archive, then
