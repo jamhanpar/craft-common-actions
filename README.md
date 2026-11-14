@@ -276,6 +276,9 @@ Lints all packaging configurations and metadata:
 - `appstreamcli validate`
 - Flatpak manifest consistency checks
 - FreeBSD dry run & embedded icons verification
+- AppImage desktop integration and bundled CLI/MCP tests, when the caller provides
+  `packaging/linux/apprun-test.sh` or `packaging/linux/apprun-cli-test.sh`. No app-local
+  workflow job is needed; a failing script fails the shared lint job.
 
 #### Caller Example:
 ```yaml
@@ -524,7 +527,17 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   `cache-save-on-dispatch: true`. The restore prefix includes the canonical root `[profile]`
   table; dependency, version and comment edits do not discard reusable dependency artifacts.
   rust-cache still keys on lockfiles, member manifests, toolchain and build environment, and
-  Cargo validates restored fingerprints. Bump `cache-version` to start afresh.
+  Cargo validates restored fingerprints. Bump `cache-version` to start afresh;
+- with `sccache: true`, sccache (through the GitHub Actions cache) for the workspace's own
+  library crates, which rust-cache doesn't keep. It writes where the dependency cache saves and
+  only reads elsewhere; set `SCCACHE_GHA_RW_MODE` in `env` to choose. Test, binary and
+  proc-macro crates aren't cacheable, so it mainly helps workspaces with many library crates.
+  sccache's cache starts afresh when `cache-version` or any `Cargo.toml` or `build.rs` changes,
+  because its key leaves out `--check-cfg`: a cached compile would replay its old
+  `unexpected_cfgs` warnings after the expected cfgs change. It also can't see files a procedural
+  macro reads without rustc tracking them (some asset-embedding macros): don't opt in while
+  such files change often, or bump `cache-version` when they do. `SCCACHE_GHA_VERSION` in
+  `env` sets the cache's version instead;
 
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
 `timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only
@@ -707,7 +720,8 @@ Fails unless `AGENTS.md` carries the shared house rules from
 the commit it was copied from and the SHA-256 of the bytes inside it. The check loads
 `standards/house-rules-core.md` (and `standards/house-rules-rust.md` when `rust` is true) at that
 commit, requires the commit to be on `main`, and compares the normalized bytes. An edited block, or
-a commit that is not on `main`, fails. An intact older commit warns. A source that cannot be read
+a commit that is not on `main`, fails. An intact older commit warns only when its normalized standards file changed on `main`.
+If the file is unchanged, there is no warning. A source that cannot be read
 fails as "could not check". `rust` defaults to true; a repository that is not Rust passes `false`.
 
 The caller is only the workflow call. The reusable workflow checks the app out and checks
@@ -803,7 +817,7 @@ Individual actions are also available for composing custom pipelines:
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
 - `actions/export-app-build-env`: Sets the app's own `<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA` for the steps after it, with the prefix its `packaging/env.sh` reads (or `env-prefix`); its `names` output lists them for a VM's `envs`.
 - `actions/check-git-sources`: The check `git-sources.yml` runs, for a job that has already checked out the app; `allowed-prefix` changes where git dependencies may come from (default `git+https://github.com/storytold/`).
-- `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history; `require-rust` asks for the Rust block as well as the core block.
+- `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history (refresh `origin/main` before checking; the local `main` ref is used only when `origin/main` is absent, never `HEAD`); `require-rust` asks for the Rust block as well as the core block.
 
 ## Storytold Organization Hosting
 
@@ -912,11 +926,15 @@ cannot read (for example one cut short by a test process that crashed while
 writing it) fails its shard and is named in an error annotation, rather than
 reaching the scan. Pass `shards: 1` to keep the single `cargo llvm-cov` job.
 Sharded runs skip doctests, because nextest does not run them.
+Each shard links the build job's target directory to its extracted copy of the
+archive, so tests that run a workspace binary through
+`env!("CARGO_BIN_EXE_<name>")` find it as they do in the gate.
 Ordinary test failures still allow coverage and static analysis to upload, but then
 fail the scan job. Missing shard status also fails closed; a green analysis job
 must not conceal failed tests. The single-shard Rust path is unchanged.
 
-The scan job frees unused runner SDKs before either Rust coverage path. Sharded
+The scan job frees unused runner SDKs before either Rust coverage path. The archive build
+frees them in the background, so the build starts at once. Sharded
 coverage merges and removes the shard profiles before extracting the test archive, then
 releases the compressed archive and temporary binaries as they are consumed.
 Disk-space snapshots in the logs show headroom before cleanup and aggregation.
