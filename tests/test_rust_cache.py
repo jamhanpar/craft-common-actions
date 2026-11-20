@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 import yaml
@@ -15,10 +16,12 @@ ACTION = yaml.load((ROOT / 'actions/rust-cache/action.yml').read_text(), Loader=
 INPUTS = ACTION['inputs']
 STEPS = ACTION['runs']['steps']
 GATE = yaml.load((ROOT / '.github/workflows/gate.yml').read_text(), Loader=yaml.BaseLoader)
-GATE_STEPS = GATE['jobs']['gate']['steps']
 OWN_ACTION = re.compile(r'^storytold/craft-common-actions/actions/[a-z0-9-]+@main$')
 PINNED = re.compile(r'^[A-Za-z0-9-]+/[A-Za-z0-9._-]+@[0-9a-f]{40}$')
 CACHES = [s for s in STEPS if 'rust-cache' in s.get('uses', '')]
+# The fixed-key entry (plain and aligned), and cache-workspace-crates' rolling entry: the newest
+# entry's restore (plain and aligned) and the run's own save.
+PLAIN, ALIGNED, NEWEST, NEWEST_ALIGNED, RUN_ENTRY = CACHES
 
 
 def step(name):
@@ -43,9 +46,9 @@ class DefinitionTests(unittest.TestCase):
                     if not OWN_ACTION.match(s['uses']):
                         self.assertRegex(s['uses'], PINNED)
 
-    def test_both_cache_steps_run_the_same_pinned_action(self):
+    def test_every_cache_step_runs_the_same_pinned_action(self):
         self.assertEqual([s['uses'] for s in CACHES],
-                         ['Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0'] * 2)
+                         ['Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0'] * 5)
 
     def test_every_rust_cache_pin_is_the_actions(self):
         # StepSecurity's v2.9.1 (851174d9) prunes Cargo's new build-dir layout, its v2.9.2
@@ -61,12 +64,18 @@ class DefinitionTests(unittest.TestCase):
                 self.assertIn(f'uses: {pinned} # v2.9.3', line)
 
     def test_restore_only_unless_the_caller_saves(self):
-        # rust-cache reads an empty save-if as "true", so the action must never pass one through empty.
+        # rust-cache trims this input and reads what is left as "true" when empty, so the action
+        # must pass one canonical word rather than whatever the caller sent.
         self.assertEqual(INPUTS['save-if']['default'], 'false')
-        for s in CACHES:
+        for s in (PLAIN, ALIGNED):
             self.assertEqual(s['with']['save-if'], '${{ steps.save.outputs.save }}')
+        for s in (NEWEST, NEWEST_ALIGNED):
+            self.assertEqual(s['with']['save-if'], 'false')
+        self.assertEqual(RUN_ENTRY['with']['save-if'], 'true')
+        self.assertIn("steps.save.outputs.save == 'true'", RUN_ENTRY['if'])
         policy = step('Cache save policy')
         self.assertEqual(policy['env'], {'SAVE': '${{ inputs.save-if }}'})
+        self.assertEqual(policy['shell'], 'bash')
         self.assertNotIn('${{', policy['run'])
 
     def test_the_key_names_one_job_and_the_gate_cache_version(self):
@@ -74,42 +83,79 @@ class DefinitionTests(unittest.TestCase):
         self.assertEqual(INPUTS['cache-version']['default'], 'v2')
         for s in CACHES:
             self.assertEqual(s['with']['prefix-key'], '${{ inputs.cache-version }}-rust')
+        for s in (PLAIN, ALIGNED):
             self.assertEqual(s['with']['shared-key'], '${{ steps.entry.outputs.key }}')
         entry = step('Cache entry')
         self.assertEqual(entry['env'], {'PROFILE': '${{ steps.cache-profile.outputs.key }}',
-                                        'JOB': '${{ inputs.job || github.job }}'})
+                                        'JOB': '${{ inputs.job || github.job }}',
+                                        'CRATES': '${{ inputs.cache-workspace-crates }}'})
         self.assertNotIn('${{', entry['run'])
 
     def test_a_failed_job_saves_nothing_by_default(self):
         self.assertEqual(INPUTS['cache-on-failure']['default'], 'false')
-        for s in CACHES:
+        for s in (PLAIN, ALIGNED, RUN_ENTRY):
             self.assertEqual(s['with']['cache-on-failure'], '${{ inputs.cache-on-failure }}')
 
-    def test_the_two_cache_steps_differ_only_in_cargo_home(self):
-        plain, aligned = CACHES
-        self.assertEqual(plain['if'], "inputs.align-environment != 'true'")
-        self.assertEqual(aligned['if'], "inputs.align-environment == 'true'")
-        self.assertEqual(plain['with'], aligned['with'])
-        self.assertEqual(plain.get('env'), None)
-        self.assertEqual(aligned['env'], {'CARGO_HOME': ''})
+    def test_the_aligned_cache_steps_differ_only_in_cargo_home(self):
+        for plain, aligned in ((PLAIN, ALIGNED), (NEWEST, NEWEST_ALIGNED)):
+            with self.subTest(step=plain['name']):
+                self.assertEqual(plain['if'].replace("inputs.align-environment != 'true'", ''),
+                                 aligned['if'].replace("inputs.align-environment == 'true'", ''))
+                self.assertIn("inputs.align-environment != 'true'", plain['if'])
+                self.assertEqual(plain['with'], aligned['with'])
+                self.assertEqual(plain.get('env'), None)
+                self.assertEqual(aligned['env'], {'CARGO_HOME': ''})
+
+    def test_workspace_crates_switch_from_the_fixed_entry_to_the_rolling_one(self):
+        self.assertEqual(INPUTS['cache-workspace-crates']['default'], 'false')
+        self.assertEqual(INPUTS['restore']['default'], 'true')
+        for s in (PLAIN, ALIGNED):
+            self.assertIn("inputs.cache-workspace-crates != 'true'", s['if'])
+        for s in (NEWEST, NEWEST_ALIGNED):
+            self.assertIn("inputs.cache-workspace-crates == 'true' && inputs.restore != 'false'", s['if'])
+            self.assertEqual(s['with']['shared-key'], '${{ steps.entry.outputs.crates }}')
+            # Without the environment and lockfile hashes, rust-cache's key is the restore prefix.
+            self.assertEqual(s['with']['add-rust-environment-hash-key'], 'false')
+        self.assertIn("inputs.cache-workspace-crates == 'true'", RUN_ENTRY['if'])
+        self.assertEqual(RUN_ENTRY['with']['shared-key'], '${{ steps.run-entry.outputs.key }}')
+        # The run's key is named after the restored entry, so the restore has to come first.
+        names = [s.get('name') for s in STEPS]
+        self.assertLess(names.index(NEWEST_ALIGNED['name']), names.index('Run entry'))
+        self.assertLess(names.index('Run entry'), names.index(RUN_ENTRY['name']))
+        self.assertEqual(step('Run entry')['if'], RUN_ENTRY['if'])
+        self.assertEqual(RUN_ENTRY['with']['cache-workspace-crates'], 'true')
+        # The same paths, so the saved entries match the restore's cache version.
+        for s in (NEWEST, NEWEST_ALIGNED, RUN_ENTRY):
+            self.assertEqual(s['with']['cache-directories'], '.ci-cache-meta')
+            self.assertNotIn('cache-bin', s['with'])
+            self.assertNotIn('cache-targets', s['with'])
 
 
 class CacheEntryTests(unittest.TestCase):
     STEP = step('Cache entry')
 
-    def run_step(self, profile, job):
+    def run_step(self, profile, job, **extra):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, 'Cargo.toml').write_text('[profile.dev]\nopt-level = 1\n')
             output = Path(directory, 'output')
             result = subprocess.run(
                 ['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
                 cwd=directory, capture_output=True, text=True,
-                env=environment(directory, {'PROFILE': profile, 'JOB': job, 'GITHUB_OUTPUT': str(output)}))
+                env=environment(directory, {'PROFILE': profile, 'JOB': job, 'GITHUB_OUTPUT': str(output), **extra}))
             written = output.read_text() if output.exists() else ''
             return result.returncode, written, result.stdout + result.stderr
 
     def test_names_the_profile_and_the_entry_job(self):
         self.assertEqual(self.run_step('a' * 64, 'gate'), (0, f"key={'a' * 64}-gate\n", ''))
+
+    def test_workspace_crates_name_the_rolling_entry_and_its_runner_prefix(self):
+        status, written, _ = self.run_step('p', 'gate', CRATES='true', RUNNER_OS='Linux', RUNNER_ARCH='X64')
+        self.assertEqual((status, written), (0, 'key=p-gate\ncrates=p-gate-crates\ncrates-os=p-gate-crates-Linux-x64\n'))
+        status, written, _ = self.run_step('p', 'gate', CRATES='true', RUNNER_OS='Windows', RUNNER_ARCH='X64')
+        self.assertIn('crates-os=p-gate-crates-Windows_NT-x64\n', written)
+        status, _, out = self.run_step('p', 'gate', CRATES='true', RUNNER_OS='Plan9', RUNNER_ARCH='X64')
+        self.assertEqual(status, 1)
+        self.assertIn('::error::', out)
 
     def test_refuses_an_empty_half(self):
         # A silent miss would cost every run; an empty job id must fail the job instead.
@@ -119,6 +165,70 @@ class CacheEntryTests(unittest.TestCase):
                 self.assertEqual(status, 1)
                 self.assertEqual(written, '')
                 self.assertIn('::error::', out)
+
+
+class RunEntryTests(unittest.TestCase):
+    """The run's own entry is named after the restored one, so a second child of it is refused."""
+    STEP = step('Run entry')
+
+    def run_step(self, meta, restore='true'):
+        with tempfile.TemporaryDirectory() as directory:
+            for name, text in meta.items():
+                Path(directory, '.ci-cache-meta').mkdir(exist_ok=True)
+                Path(directory, '.ci-cache-meta', name).write_text(text)
+            output = Path(directory, 'output')
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-c', self.STEP['run']], cwd=directory, capture_output=True, text=True,
+                env={**os.environ, 'PREFIX': 'p-gate-crates-Linux-x64', 'RESTORE': restore, 'RUN_ID': '900',
+                     'RUN': '900-2', 'GITHUB_OUTPUT': str(output)})
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return output.read_text(), Path(directory, '.ci-cache-meta', 'entry').read_text()
+
+    def test_a_child_is_named_after_the_run_that_saved_its_parent(self):
+        self.assertEqual(self.run_step({'commit': 'abc\n', 'entry': '812\n'}), ('key=p-gate-crates-Linux-x64-812-0\n', '900\n'))
+
+    def test_nothing_restored_names_one_shared_first_entry(self):
+        self.assertEqual(self.run_step({})[0], 'key=p-gate-crates-Linux-x64-0-0\n')
+
+    def test_a_cold_build_and_an_entry_without_the_record_save_their_own(self):
+        self.assertEqual(self.run_step({}, restore='false')[0], 'key=p-gate-crates-Linux-x64-900-2\n')
+        self.assertEqual(self.run_step({'commit': 'abc\n'})[0], 'key=p-gate-crates-Linux-x64-900-2\n')
+        self.assertEqual(self.run_step({'commit': 'abc\n', 'entry': 'x'})[0], 'key=p-gate-crates-Linux-x64-900-2\n')
+
+    def test_a_child_key_never_equals_a_run_s_own_and_old_prunes_still_match(self):
+        # Attempts start at 1. The `<digits>-<digits>-` shape is what callers' prune jobs parse.
+        child = self.run_step({'commit': 'abc', 'entry': '812'})[0].split('=', 1)[1].strip()
+        self.assertRegex(child + '-Linux-x64-d843ffbc-3e8a8849', r'-crates-[A-Za-z_]+-[a-z0-9]+-[0-9]+-0-')
+
+
+class UnitRecordTests(unittest.TestCase):
+    STEP = step('Unit record')
+
+    def test_only_a_saving_leg_records(self):
+        self.assertEqual(self.STEP['if'], "steps.save.outputs.save == 'true'")
+        self.assertEqual(STEPS[-1], self.STEP)
+
+    def test_the_record_and_the_start_time_land_where_the_trim_reads_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = environment(directory, {'RUNNER_TEMP': directory, 'GITHUB_ENV': str(Path(directory, 'env'))})
+            before = int(time.time())
+            subprocess.run(['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
+                           cwd=directory, env=env, check=True)
+            record = Path(directory, 'env').read_text().strip().removeprefix('CRAFT_CACHE_UNITS=')
+            self.assertEqual(Path(record).parent, Path(directory))
+            # actions/cache-trim reads `<record stem>.start`.
+            start = int(Path(record).with_suffix('.start').read_text())
+            self.assertTrue(before <= start <= time.time())
+
+    def test_the_variable_name_is_outside_the_hashed_prefixes(self):
+        # rust-cache hashes every CARGO*, CC*, CFLAGS*, CXX*, CMAKE* and RUST* variable. Only saving
+        # legs set this one, so a hashed name would split main's key from every pull request's. (The
+        # step runs after both restores, so it cannot change this job's key; it guards the name for
+        # a later step that calls rust-cache.)
+        name = re.search(r'echo "([A-Z_]+)=', self.STEP['run']).group(1)
+        self.assertEqual(name, 'CRAFT_CACHE_UNITS')
+        self.assertEqual(cache_key(GATE_PROFILE, 'gate', HOSTED_ENV + [f'{name}=/home/runner/work/_temp/x.jsonl']),
+                         HOSTED_GATE)
 
 
 class TargetDirectoryTests(unittest.TestCase):
@@ -155,25 +265,86 @@ class TargetDirectoryTests(unittest.TestCase):
 
 
 class SavePolicyTests(unittest.TestCase):
+    """The action hands rust-cache one canonical word: rust-cache trims its input and reads what is
+    left as `true` when empty, so anything it does not recognize must arrive as `false`."""
     STEP = step('Cache save policy')
+
+    def run_step(self, directory, save):
+        output = Path(directory, 'output')
+        if output.exists():
+            output.unlink()
+        extra = {'GITHUB_OUTPUT': str(output)}
+        env = environment(directory, extra)
+        if save is not None:
+            env['SAVE'] = save
+        else:
+            env.pop('SAVE', None)
+        result = subprocess.run(
+            ['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
+            cwd=directory, capture_output=True, text=True, env=env)
+        return result.returncode, output.read_text() if output.exists() else '', result.stdout + result.stderr
 
     def resolve(self, save):
         with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory, 'output')
-            result = subprocess.run(
-                ['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
-                cwd=directory, capture_output=True, text=True,
-                env=environment(directory, {'SAVE': save, 'GITHUB_OUTPUT': str(output)}))
-            return result.returncode, output.read_text() if output.exists() else ''
+            return self.run_step(directory, save)
 
-    def test_an_empty_input_never_saves(self):
-        self.assertEqual(self.resolve(''), (0, 'save=false\n'))
+    def test_a_blank_or_whitespace_only_input_never_saves(self):
+        # rust-cache turns a trimmed-to-empty input into `true`: a caller passing a blank variable
+        # to mean "no decision" would otherwise save, so every blank shape must say false.
+        for save in ('', ' ', '\t', '\n', '\r\n', ' \t\r\n '):
+            with self.subTest(save=save):
+                self.assertEqual(self.resolve(save), (0, 'save=false\n', ''))
 
-    def test_a_decision_passes_through_unchanged(self):
-        self.assertEqual(self.resolve('false'), (0, 'save=false\n'))
-        self.assertEqual(self.resolve('true'), (0, 'save=true\n'))
-        expression = "github.event_name != 'pull_request' && github.ref_name == 'x'"
-        self.assertEqual(self.resolve(expression), (0, f'save={expression}\n'))
+    def test_an_unset_input_never_saves(self):
+        self.assertEqual(self.resolve(None), (0, 'save=false\n', ''))
+
+    def test_true_and_false_remain_decisions(self):
+        for save in ('true', 'TRUE', 'True', ' true ', '\ttrue\r\n'):
+            with self.subTest(save=save):
+                self.assertEqual(self.resolve(save), (0, 'save=true\n', ''))
+        # A newline is whitespace to rust-cache's trim as well, so `false` there means false.
+        for save in ('false', 'FALSE', 'False', ' false ', '\tfalse\r\n', 'false\n'):
+            with self.subTest(save=save):
+                self.assertEqual(self.resolve(save), (0, 'save=false\n', ''))
+
+    def test_anything_else_fails_closed(self):
+        # Actions evaluates `${{ ... }}` before this action sees an input, so the text of an
+        # expression is not a decision and must not become one. Nor is any other spelling. The two
+        # Unicode wrappers differ in kind and are both refused: rust-cache's trim leaves U+0085
+        # (NEL) in place, so it refuses that value too, while U+00A0 (NBSP) and U+3000 are
+        # whitespace to its trim, so refusing them is this wrapper's deliberately narrower choice.
+        for save in ("github.event_name != 'pull_request'", 'yes', '1', 'on', 'off', 'TRUE!',
+                     '\u0085true\u0085', '\u00a0true\u00a0', '\u3000true'):
+            with self.subTest(save=save):
+                status, written, output = self.resolve(save)
+                self.assertEqual((status, written), (0, 'save=false\n'))
+                self.assertIn('::warning::', output)
+
+    def test_the_unrecognized_value_is_never_echoed(self):
+        # A configuration value can be a misdirected secret; the warning names the policy, not the
+        # value, so nothing a caller passes as save-if reaches the log.
+        sentinel = 'SYNTHETIC-SENTINEL-c0ffee-not-a-real-secret'
+        status, written, output = self.resolve(sentinel)
+        self.assertEqual((status, written), (0, 'save=false\n'))
+        self.assertIn('::warning::', output)
+        self.assertNotIn(sentinel, output)
+
+    def test_a_newline_cannot_add_a_second_output_record(self):
+        # rust-cache saves when its trimmed, lowercased input is exactly `true`, so a second
+        # GITHUB_OUTPUT record could override the decision. The output is one canonical line.
+        for save in ('false\nsave=true', 'true\nsave=false', '\nsave=true', ' save=true\n'):
+            with self.subTest(save=save):
+                status, written, _ = self.resolve(save)
+                self.assertEqual((status, written), (0, 'save=false\n'))
+                self.assertEqual(written.count('\n'), 1)
+                self.assertNotIn('save=true', written)
+
+    def test_the_input_is_never_run_as_shell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            save = '$(touch OWNED); `touch OWNED2`'
+            self.assertEqual(self.run_step(directory, save)[:2], (0, 'save=false\n'))
+            self.assertFalse(Path(directory, 'OWNED').exists())
+            self.assertFalse(Path(directory, 'OWNED2').exists())
 
 
 class ProfileKeyTests(unittest.TestCase):
@@ -271,6 +442,18 @@ class KeyLayoutTests(unittest.TestCase):
         self.assertNotEqual(cache_key(GATE_PROFILE, 'gate', HOSTED_ENV),
                             cache_key(GATE_PROFILE, 'gate', HOSTED_ENV, prefix='v1-web-rust'))
 
+    def test_every_run_entry_starts_with_the_restore_key(self):
+        # rust-cache's restore key for the newest entry (no environment or lockfile hash) must be a
+        # prefix of each run's saved key, or the restore finds nothing; and the prefix must not
+        # reach another OS's entries or the fixed-key entry.
+        restore = f'v2-rust-{GATE_PROFILE}-gate-crates-{OS_ARCH}'
+        saved = cache_key(GATE_PROFILE, f'gate-crates-{OS_ARCH}-44460709974-1', HOSTED_ENV, prefix='v2-rust')
+        self.assertTrue(saved.startswith(restore + '-'), saved)
+        windows = cache_key(GATE_PROFILE, 'gate-crates-Windows_NT-x64-44460709974-1', HOSTED_ENV,
+                            prefix='v2-rust', os_arch='Windows_NT-x64')
+        self.assertFalse(windows.startswith(restore))
+        self.assertFalse(cache_key(GATE_PROFILE, 'gate', HOSTED_ENV, prefix='v2-rust').startswith(restore))
+
     def test_an_exported_cargo_home_splits_the_key(self):
         self.assertNotEqual(cache_key(GATE_PROFILE, 'gate', HOSTED_ENV + ['CARGO_HOME=/home/runner/.cargo']),
                             cache_key(GATE_PROFILE, 'gate', HOSTED_ENV))
@@ -342,42 +525,28 @@ class AlignEnvironmentTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
+    """gate.yml's side of the key. gate-setup's call of this action: tests/test_gate_setup.py."""
+
     def test_fixed_gate_environment_is_part_of_the_restore_contract(self):
         # Callers can add build variables through env/dev-debug. Photo opts out of the debug
         # override; changing this shared fixed part still splits its restore from the gate.
+        for job in ('build', 'lint'):
+            self.assertEqual(GATE['jobs'][job]['env'], GATE['jobs']['gate']['env'], job)
         fixed = GATE['jobs']['gate']['env']
         hashed = {name: value for name, value in fixed.items()
                   if name.startswith(('CARGO', 'CC', 'CFLAGS', 'CXX', 'CMAKE', 'RUST'))}
         self.assertEqual(hashed, {'CARGO_TERM_COLOR': 'always', 'CARGO_INCREMENTAL': '0',
                                   'CARGO_NET_RETRY': '10', 'RUST_BACKTRACE': '1'})
-        install = next(s for s in GATE_STEPS if s.get('name') == 'Install Rust')
-        # Replacing rustup with an action that exports CARGO_HOME needs a cache-contract review.
-        self.assertNotIn('GITHUB_ENV', install['run'])
-
-    def test_setup_shell_steps_do_not_add_cargo_home_to_the_key(self):
-        cache = next(i for i, s in enumerate(GATE_STEPS)
-                     if s.get('uses') == 'storytold/craft-common-actions/actions/rust-cache@main')
-        for setup in GATE_STEPS[:cache]:
-            # Conservative source guard, not shell data-flow analysis. An opaque setup action
-            # still needs a hosted key comparison; callers' generic env input remains supported.
-            self.assertNotIn('CARGO_HOME', setup.get('run', ''), setup.get('name', setup.get('uses')))
 
     def test_gate_and_action_cache_version_defaults_agree(self):
         default = GATE['on']['workflow_call']['inputs']['cache-version']['default']
         self.assertEqual(default, INPUTS['cache-version']['default'])
 
-    def test_the_gate_restores_through_the_action(self):
-        calls = [s for s in GATE_STEPS
-                 if s.get('uses') == 'storytold/craft-common-actions/actions/rust-cache@main']
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]['with']['cache-version'], '${{ inputs.cache-version }}')
-        self.assertEqual(calls[0]['with']['cache-on-failure'], 'false')
-
-    def test_no_second_copy_of_the_key_remains(self):
-        for s in GATE_STEPS:
-            with self.subTest(step=s.get('name')):
-                self.assertNotRegex(s.get('uses', ''), r'^[^/]+/rust-cache@')
-        self.assertNotIn('Cache profile key', [s.get('name') for s in GATE_STEPS])
+    def test_no_gate_job_keys_the_cache_itself(self):
+        for name, job in GATE['jobs'].items():
+            for s in job['steps']:
+                with self.subTest(job=name, step=s.get('name')):
+                    self.assertNotRegex(s.get('uses', ''), r'/rust-cache@')
 
 
 if __name__ == '__main__':
