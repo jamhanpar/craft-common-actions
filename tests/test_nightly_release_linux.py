@@ -387,10 +387,12 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
             condition = job_block(self.release, name).split('    runs-on:', 1)[0]
             with self.subTest(job=name):
                 self.assertIn("contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64')", condition)
-                for fragment in ("github.repository == 'storytold/photocraft'", "github.event_name == 'workflow_dispatch'",
-                                 "github.ref == 'refs/heads/release'", "github.ref_type == 'branch'"):
+                signer_refs = "(github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer')"
+                for fragment in ("github.repository == format('storytold/{0}', inputs.app-name)", "github.event_name == 'workflow_dispatch'",
+                                 signer_refs, "github.ref_type == 'branch'"):
                     self.assertIn(fragment, condition)
-                self.assertNotIn('||', condition)
+                # The signer-ref allowlist is the only alternative in the guard.
+                self.assertNotIn('||', condition.replace(signer_refs, ''))
         self.assertIn("needs.validate.outputs.admitted == 'true'", job_block(self.release, 'sign-linux'))
         self.assertIn("needs.sign-linux.result == 'success'", job_block(self.release, 'verify-linux'))
 
@@ -416,7 +418,8 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
         for forbidden in ('secrets.', 'environment:', 'id-token', ': write', 'cache', 'cargo xtask version set', '--skip-build'):
             self.assertNotIn(forbidden, build)
         self.assertIn('bash packaging/linux/nightly.sh --arch x86_64', build)
-        self.assertIn('PHOTOCRAFT_BUILD_CHANNEL: nightly-v1', build)
+        # The app's <PREFIX>_BUILD_CHANNEL comes from its registry row, scoped to the compile step.
+        self.assertIn('nightly_app.py env --app-name "$NIGHTLY_APP" --export', build)
         self.assertIn('main-plan --platform linux-x86_64', build)
         self.assertIn('main-seal --platform linux-x86_64', build)
         self.assertIn('name: nightly-unsigned-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}', build)
