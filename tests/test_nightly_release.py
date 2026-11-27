@@ -30,7 +30,7 @@ class PacketAPI(fixtures.API):
         self.calls.append((method, suffix))
         if method != "GET": self.writes.append((method, suffix, copy.deepcopy(data)))
         if method == "POST" and suffix == "/releases":
-            self.release = {**data, "id": 7, "published_at": None}
+            self.release = {**data, "id": 7, "published_at": None, "immutable": False}
             return copy.deepcopy(self.release)
         if method == "PATCH" and suffix == "/releases/7":
             self.release.update(data, published_at="2026-11-21T00:00:00Z" if self.bad_timestamp else "2026-11-22T02:00:00Z")
@@ -871,6 +871,24 @@ class BridgeTests(unittest.TestCase):
             if asset["name"] == self.plan["platforms"][MAC]["asset"]: asset["digest"] = "sha256:"+"0"*64
         with self.assertRaisesRegex(ValueError, "final asset digest"):
             b.previous_publication(api, self.registry, self.policy, self.request, [api.release])
+
+    def test_admitted_first_signer_creation_skew_round_trips_as_history(self):
+        path = '/actions/runs/200/attempts/1'
+        self.fx.modify_run(200, 'created_at', '2026-11-22T00:00:01Z')
+        self.fx.api.rows[path]['created_at'] = '2026-11-22T00:00:02Z'
+        self.request = self.fx.invoke()
+        api, release = self.history(live=True)
+        prior = b.previous_publication(api, self.registry, self.policy, self.request, [release])
+        self.assertEqual(prior['identity'], self.plan['identity'])
+        for updates in ({'created_at': '2026-11-22T00:00:03Z'},
+                        {'created_at': '2026-11-22T00:00:00Z'},
+                        {'run_started_at': '2026-11-22T00:00:02Z'},
+                        {'head_sha': 'f'*40}, {'run_attempt': 2}):
+            with self.subTest(updates=updates):
+                api, release = self.history(live=True)
+                api.rows[path].update(updates)
+                with self.assertRaisesRegex(ValueError, 'prior exact run'):
+                    b.previous_publication(api, self.registry, self.policy, self.request, [release])
 
     def test_live_v2_history_requires_the_linux_detached_signature(self):
         # A receipt that simply omits Linux support must not authenticate history (the feed requires the .asc).

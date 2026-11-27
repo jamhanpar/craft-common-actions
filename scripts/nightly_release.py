@@ -219,11 +219,15 @@ def verified_history_roles(api, policy, request):
         role = request[name]; branch = r.signer_branch(policy) if name == "signer" else "main"
         run = api.request("GET", f"/actions/runs/{role['run_id']}/attempts/{role['run_attempt']}")
         r.repository(policy, run.get("repository")); r.repository(policy, run.get("head_repository"))
+        # A live v3 request retains the canonical creation time. Compare the known skew
+        # to the exact attempt, not the root endpoint, which can now describe a rerun.
+        created_matches = run.get("created_at") == role["created_at"] or (
+            name == "signer" and policy.get("schema") == r.LIVE_POLICY and r.first_signer_creation_skew(role, run))
         n.require(run.get("id") == role["run_id"] and run.get("run_attempt") == role["run_attempt"] and
             run.get("head_sha") == role["source_commit"] and run.get("workflow_id") == role["workflow_id"] and
             run.get("head_branch") == branch and p.run_workflow_path(run, branch) == role["workflow_path"] and
             run.get("event") == role["event"] and run.get("run_number") == role["run_number"] and
-            run.get("created_at") == role["created_at"] and run.get("run_started_at") == role["run_started_at"] and
+            created_matches and run.get("run_started_at") == role["run_started_at"] and
             run.get("triggering_actor", {}).get("login") == role["triggering_actor"] and run.get("status") == "completed" and
             run.get("conclusion") == "success", "prior exact run/attempt differs or failed")
     # A skipped/green wrapper does not prove publication. Require the exact source-owned step.
@@ -270,8 +274,12 @@ def previous_publication(api, registry, policy, current_request, rows):
     """Authenticate historical protected-release evidence; never execute old code.
 
     Like v1 ownership evidence, Actions metadata is source-owned evidence, not an
-    independent tag-creator signature. Immutable nightly tags/releases are an
-    activation prerequisite. Pruning remains off and has no path through here.
+    independent tag-creator signature. For v2 and marked v1 history, verify
+    the listed release, current tag, and recorded asset digests. Markerless
+    history checks release policy, run provenance, and tag, not asset digests.
+    None proves that a repository writer never changed or removed a release.
+    A mutable-release pilot must not infer permission to publish again from
+    an empty listing. Pruning is separate.
     """
     release = p.newest_nightly(rows)
     if release is None:
@@ -641,7 +649,7 @@ def combine(state, directories, output):
 
 
 def publish(policy, state, combined, packet, ownership, api, guard, registry):
-    """Only new immutable nightlies; public-but-unreconciled state is never retried."""
+    """Publish a new tag and prerelease; never retry a public-but-unreconciled write."""
     packet = owned_output(packet)
     ownership = owned_output(ownership)
     plan = state["plan"]; prepared = plan["identity"]
